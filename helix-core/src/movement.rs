@@ -571,32 +571,28 @@ pub fn goto_treesitter_object(
 ) -> Range {
     let get_range = move |range: Range| -> Option<Range> {
         let byte_pos = slice.char_to_byte(range.cursor(slice));
+        let capture_names = [TextObject::Movement, TextObject::Around, TextObject::Inside]
+            .map(|text_object| format!("{object_name}.{text_object}"));
+        let capture_names = capture_names.each_ref().map(String::as_str);
 
-        // Walk the layers at the cursor with each language's own tree and textobject query.
-        // Resolved per step so the motion can cross into and out of injected regions.
-        let cap_name = |t: TextObject| format!("{}.{}", object_name, t);
-        let cap_names = [
-            cap_name(TextObject::Movement),
-            cap_name(TextObject::Around),
-            cap_name(TextObject::Inside),
-        ];
-        let cap_names = cap_names.each_ref().map(String::as_str);
-        let node =
-            textobject_layers(syntax, loader, byte_pos as u32).find_map(|(query, root)| {
-                let nodes = query.capture_nodes_any(&cap_names, &root, slice)?;
-                match dir {
-                    Direction::Forward => nodes
-                        .filter(|n| n.start_byte() > byte_pos)
-                        .min_by_key(|n| (n.start_byte(), Reverse(n.end_byte()))),
-                    Direction::Backward => nodes
-                        .filter(|n| n.end_byte() < byte_pos)
-                        .max_by_key(|n| (n.end_byte(), Reverse(n.start_byte()))),
-                }
-            })?;
+        // Search all layers at the cursor, from the injected language through its
+        // enclosing languages. The innermost layer may not have any more matching
+        // objects, while an enclosing layer still has candidates.
+        let nodes = textobject_layers(syntax, loader, byte_pos as u32)
+            .filter_map(|(query, root)| query.capture_nodes_any(&capture_names, &root, slice))
+            .flatten()
+            .map(|node| (node.start_byte(), node.end_byte()))
+            .filter(|&(start, end)| match dir {
+                Direction::Forward => start > byte_pos,
+                Direction::Backward => end < byte_pos,
+            });
+
+        let (start_byte, end_byte) = match dir {
+            Direction::Forward => nodes.min_by_key(|&(start, end)| (start, Reverse(end)))?,
+            Direction::Backward => nodes.max_by_key(|&(start, end)| (end, Reverse(start)))?,
+        };
 
         let len = slice.len_bytes();
-        let start_byte = node.start_byte();
-        let end_byte = node.end_byte();
         if start_byte >= len || end_byte >= len {
             return None;
         }
